@@ -24,7 +24,7 @@ ENV MAX_JOBS=4
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir packaging ninja && \
-    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121 && \
     pip install --no-cache-dir "flash-attn==2.6.3" --no-build-isolation
 
 # Copy source code and entrypoint

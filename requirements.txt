@@ -1,6 +1,6 @@
 # requirements.txt
-# torch>=2.2.0
-# torchvision>=0.17.0
+torch==2.2.0
+torchvision==0.17.0
 transformers>=4.49.0
 accelerate>=0.28.0
 peft>=0.10.0
