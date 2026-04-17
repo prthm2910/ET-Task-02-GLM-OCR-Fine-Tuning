@@ -1,0 +1,11 @@
+.env
+chat.txt
+.venv
+__pycache__
+.ipynb_checkpoints
+.vscode
+.idea
+.agent
+.aws-sam
+.aws
+.sagemaker
