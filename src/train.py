@@ -35,7 +35,10 @@ def train():
     parser.add_argument("--batch_size", type=int, default=int(sm_hps.get("batch_size", 1)))
     parser.add_argument("--learning_rate", type=float, default=float(sm_hps.get("learning_rate", 1e-4)))
 
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        logger.info(f"Ignoring unknown arguments: {unknown}")
+    
     is_smoke_test = str(args.smoke_test).lower() == "true"
 
     logger.info(f"Loading sharded dataset from: {args.train_dir}")
