@@ -124,15 +124,25 @@ def train():
                 
                 formatted_messages.append({"role": role, "content": formatted_content})
 
-            inputs = processor.apply_chat_template(
+            # 2. Apply chat template (Render string only)
+            prompt = processor.apply_chat_template(
                 formatted_messages,
-                images=sample_images,
-                tokenize=True,
-                add_generation_prompt=False,
-                return_dict=True,
-                return_tensors="pt"
+                tokenize=False,
+                add_generation_prompt=False
             )
-            batch_inputs.append({k: v.squeeze(0) for k, v in inputs.items()})
+            
+            # 3. Process multimodal inputs explicitly
+            inputs = processor(
+                text=[prompt], 
+                images=sample_images, 
+                return_tensors="pt",
+                padding=True
+            )
+            
+            # Remove batch dimension and pop token_type_ids if present (GLM-OCR quirk)
+            processed = {k: v.squeeze(0) for k, v in inputs.items()}
+            processed.pop("token_type_ids", None)
+            batch_inputs.append(processed)
         
         return {k: [dic[k] for dic in batch_inputs] for k in batch_inputs[0].keys()}
 
