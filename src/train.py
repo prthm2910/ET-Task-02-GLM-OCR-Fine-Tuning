@@ -8,18 +8,15 @@ from transformers import (
     AutoProcessor, 
     GlmOcrForConditionalGeneration, 
     TrainingArguments, 
-    Trainer,
-    DataCollatorForSeq2Seq
+    Trainer
 )
 from peft import LoraConfig, get_peft_model, TaskType
 from datasets import load_from_disk
 
-# 1. Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 def load_hyperparameters():
-    """Load SageMaker hyperparameters from the local config file."""
     hp_path = "/opt/ml/input/config/hyperparameters.json"
     if os.path.exists(hp_path):
         with open(hp_path, "r") as f:
@@ -30,26 +27,19 @@ def load_hyperparameters():
     return {}
 
 def find_all_linear_names(model):
-    """Identify all linear layers to target for LoRA fine-tuning."""
     cls = torch.nn.Linear
     lora_module_names = set()
     for name, module in model.named_modules():
         if isinstance(module, cls):
             names = name.split(".")
-            # Target the specific linear layer name
             lora_module_names.add(names[-1])
-    
-    # Exclude common output heads and vision model to focus on the language decoder
     for head in ["lm_head", "output_layer", "classifier"]:
         if head in lora_module_names:
             lora_module_names.remove(head)
-            
     return list(lora_module_names)
 
 def train():
-    # 2. Load Hyperparameters
     sm_hps = load_hyperparameters()
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_dir", type=str, default="/opt/ml/input/data/training")
     parser.add_argument("--smoke_test", type=str, default=sm_hps.get("smoke_test", "False"))
@@ -57,31 +47,17 @@ def train():
     parser.add_argument("--batch_size", type=int, default=int(sm_hps.get("batch_size", 1)))
     parser.add_argument("--learning_rate", type=float, default=float(sm_hps.get("learning_rate", 1e-4)))
 
-    # Use parse_known_args to ignore SageMaker's internal "train" argument
     args, unknown = parser.parse_known_args()
-    if unknown:
-        logger.info(f"Ignoring unknown arguments: {unknown}")
-    
     is_smoke_test = str(args.smoke_test).lower() == "true"
 
-    # 3. Load Dataset
-    logger.info(f"Loading dataset from: {args.train_dir}")
     dataset = load_from_disk(args.train_dir)
-
     if is_smoke_test:
-        logger.info("SMOKE TEST enabled: limiting to 20 samples.")
         dataset = dataset.select(range(min(20, len(dataset))))
 
-    # 4. Initialize Model and Processor
     model_id = "zai-org/GLM-OCR"
     token = os.environ.get("HF_TOKEN")
     
-    processor = AutoProcessor.from_pretrained(
-        model_id, 
-        trust_remote_code=True, 
-        token=token
-    )
-
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, token=token)
     model = GlmOcrForConditionalGeneration.from_pretrained(
         model_id, 
         torch_dtype=torch.bfloat16,
@@ -90,36 +66,23 @@ def train():
         token=token
     )
 
-    # 5. Apply LoRA
     target_modules = find_all_linear_names(model)
-    logger.info(f"Targeting modules for LoRA: {target_modules}")
-
     config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        target_modules=target_modules,
-        lora_dropout=0.05,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM
+        r=16, lora_alpha=32, target_modules=target_modules,
+        lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM
     )
-    
     model = get_peft_model(model, config)
     model.print_trainable_parameters()
 
-    # 6. Preprocessing Logic (The Fix for 'labels' and 'loss')
     def preprocess_function(examples):
-        batch_input_ids = []
-        batch_labels = []
-        batch_pixel_values = []
-        batch_image_grid_thw = []
-        
+        batch_inputs = []
         for i in range(len(examples["messages"])):
             msg_list = examples["messages"][i]
             sample_images = examples["images"][i]
             if not isinstance(sample_images, list):
                 sample_images = [sample_images]
             
-            # Step A: Format for GLM-OCR
+            # Format message for GLM-OCR
             formatted_messages = []
             for m in msg_list:
                 role = m["role"]
@@ -133,39 +96,18 @@ def train():
                     formatted_content = [{"type": "text", "text": content_str}]
                 formatted_messages.append({"role": role, "content": formatted_content})
 
-            # Step B: Render string and tokenize
-            prompt = processor.apply_chat_template(
-                formatted_messages,
-                tokenize=False,
-                add_generation_prompt=False
-            )
+            prompt = processor.apply_chat_template(formatted_messages, tokenize=False, add_generation_prompt=False)
             
-            inputs = processor(
-                text=[prompt], 
-                images=sample_images, 
-                return_tensors="pt"
-            )
+            inputs = processor(text=[prompt], images=sample_images, return_tensors="pt")
+            item = {k: v.squeeze(0) for k, v in inputs.items()}
             
-            # Step C: Prepare Tensors and create labels
-            input_ids = inputs["input_ids"].squeeze(0)
+            # THE FIX: Add labels for loss calculation
+            # For autoregressive training, labels are the same as input_ids.
+            item["labels"] = item["input_ids"].clone()
+            batch_inputs.append(item)
             
-            # THE FIX: Create labels from input_ids
-            # In causal training, labels are just a copy of the input_ids
-            labels = input_ids.clone()
-            
-            batch_input_ids.append(input_ids)
-            batch_labels.append(labels)
-            batch_pixel_values.append(inputs["pixel_values"].squeeze(0))
-            batch_image_grid_thw.append(inputs["image_grid_thw"].squeeze(0))
-        
-        return {
-            "input_ids": batch_input_ids,
-            "labels": batch_labels,
-            "pixel_values": batch_pixel_values,
-            "image_grid_thw": batch_image_grid_thw
-        }
+        return {k: [d[k] for d in batch_inputs] for k in batch_inputs[0].keys()}
 
-    # Map the preprocessing
     train_dataset = dataset.map(
         preprocess_function, 
         batched=True, 
@@ -173,7 +115,32 @@ def train():
         remove_columns=dataset.column_names
     )
 
-    # 7. Training Arguments
+    class MultimodalDataCollator:
+        def __call__(self, features):
+            # Extract labels before padding as processor.pad may ignore them
+            labels = [f.pop("labels") for f in features] if "labels" in features[0] else None
+            
+            # Pad the remaining features (input_ids, attention_mask, pixel_values, etc.)
+            batch = processor.pad(features, return_tensors="pt")
+            
+            if labels is not None:
+                max_label_length = max(len(l) for l in labels)
+                padded_labels = []
+                for l in labels:
+                    # Pad labels with -100 to ignore padding in loss calculation
+                    padding_length = max_label_length - len(l)
+                    if padding_length > 0:
+                        padded_labels.append(torch.cat([l, torch.full((padding_length,), -100, dtype=torch.long)]))
+                    else:
+                        padded_labels.append(l)
+                batch["labels"] = torch.stack(padded_labels)
+                
+            # SAFETY CHECK: Ensure mm_token_type_ids exists if needed by the model
+            if "mm_token_type_ids" not in batch and "input_ids" in batch:
+                batch["mm_token_type_ids"] = torch.zeros_like(batch["input_ids"])
+                
+            return batch
+
     training_args = TrainingArguments(
         output_dir="/opt/ml/model",
         per_device_train_batch_size=args.batch_size,
@@ -183,29 +150,21 @@ def train():
         bf16=True,
         logging_steps=1,
         save_strategy="no" if is_smoke_test else "epoch",
-        remove_unused_columns=False, # CRITICAL: Keeps pixel_values and image_grid_thw
+        remove_unused_columns=False, # Crucial for multimodal
         report_to="none"
-    )
-
-    # 8. Use a Data Collator to handle multimodal padding
-    data_collator = DataCollatorForSeq2Seq(
-        processor.tokenizer,
-        model=model,
-        label_pad_token_id=-100,
-        pad_to_multiple_of=8
     )
 
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        data_collator=data_collator
+        data_collator=MultimodalDataCollator()
     )
 
-    logger.info("Ready. Starting Training...")
+    logger.info("Starting Training...")
     trainer.train()
     
-    logger.info("Training complete. Saving model to /opt/ml/model")
+    logger.info("Saving artifacts...")
     trainer.save_model("/opt/ml/model")
     processor.save_pretrained("/opt/ml/model")
 
