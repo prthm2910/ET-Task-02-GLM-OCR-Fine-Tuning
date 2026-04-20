@@ -22,7 +22,7 @@ ENV_VARS = {
 }
 
 def run_parallel_data_prep():
-    splits = ["train", "test", "validation"]
+    splits = ["train", "test", "val"]
     print(f"Launching {len(splits)} parallel jobs for: {splits}")
     
     for split in splits:
@@ -38,6 +38,7 @@ def run_parallel_data_prep():
         )
         
         # wait=False allows us to launch the next one immediately
+        # logs=False is required when wait=False to avoid ValueError
         processor.run(
             outputs=[
                 ProcessingOutput(
@@ -47,7 +48,8 @@ def run_parallel_data_prep():
                 )
             ],
             arguments=["--split", split],
-            wait=False 
+            wait=False,
+            logs=False
         )
     print("All jobs launched! Check the SageMaker Console to monitor them.")
 
@@ -70,4 +72,5 @@ def run_training(is_smoke_test=True):
     estimator.fit({"training": train_input}, wait=True)
 
 if __name__ == "__main__":
-    run_parallel_data_prep()
+    # run_parallel_data_prep()
+    model_data = run_training(is_smoke_test=True)
