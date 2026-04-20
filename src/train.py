@@ -10,7 +10,7 @@ from transformers import (
     TrainingArguments, 
     Trainer
 )
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, TaskType
 from datasets import load_from_disk
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,15 +20,33 @@ def load_hyperparameters():
     hp_path = "/opt/ml/input/config/hyperparameters.json"
     if os.path.exists(hp_path):
         with open(hp_path, "r") as f:
-            return json.load(f)
+            try:
+                return json.load(f)
+            except Exception as e:
+                logger.error(f"Error loading hyperparameters: {e}")
     return {}
+
+# Helper to find all linear layers for LoRA
+def find_all_linear_names(model):
+    cls = torch.nn.Linear
+    lora_module_names = set()
+    for name, module in model.named_modules():
+        if isinstance(module, cls):
+            names = name.split(".")
+            lora_module_names.add(names[-1])
+    
+    # Exclude common output heads
+    for head in ["lm_head", "output_layer", "classifier"]:
+        if head in lora_module_names:
+            lora_module_names.remove(head)
+            
+    return list(lora_module_names)
 
 def train():
     # 1. Load Hyperparameters from SageMaker JSON
     sm_hps = load_hyperparameters()
 
     parser = argparse.ArgumentParser()
-    # SageMaker mounts S3 input data to /opt/ml/input/data/<channel_name>
     parser.add_argument("--train_dir", type=str, default="/opt/ml/input/data/training")
     parser.add_argument("--smoke_test", type=str, default=sm_hps.get("smoke_test", "False"))
     parser.add_argument("--epochs", type=int, default=int(sm_hps.get("epochs", 3)))
@@ -42,7 +60,6 @@ def train():
     is_smoke_test = str(args.smoke_test).lower() == "true"
 
     logger.info(f"Loading sharded dataset from: {args.train_dir}")
-    # load_from_disk automatically detects and merges the Arrow shards
     dataset = load_from_disk(args.train_dir)
 
     if is_smoke_test:
@@ -67,37 +84,37 @@ def train():
         token=token
     )
 
-    # LoRA Configuration - Targeting standard GLM Linear layers
+    # 2. Dynamic LoRA Configuration
+    target_modules = find_all_linear_names(model)
+    logger.info(f"Dynamically identified LoRA target modules: {target_modules}")
+
     config = LoraConfig(
         r=16,
         lora_alpha=32,
-        target_modules=["query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"],
+        target_modules=target_modules,
         lora_dropout=0.05,
         bias="none",
-        task_type="CAUSAL_LM"
+        task_type=TaskType.CAUSAL_LM
     )
+    
     model = get_peft_model(model, config)
-
+    model.print_trainable_parameters()
 
     # Preprocessing
     def preprocess_function(examples):
         batch_inputs = []
         for i in range(len(examples["messages"])):
             msg_list = examples["messages"][i]
-            # Ensure images is a list of PIL objects
             sample_images = examples["images"][i]
             if not isinstance(sample_images, list):
                 sample_images = [sample_images]
             
-            # 1. Convert ShareGPT string content to Multimodal List format
             formatted_messages = []
             for m in msg_list:
                 role = m["role"]
                 content_str = m["content"]
                 
                 if role == "user":
-                    # For GLM-OCR, the user prompt must contain the image type
-                    # We replace the text placeholder <image> with the actual dict
                     formatted_content = [
                         {"type": "image"}, 
                         {"type": "text", "text": content_str.replace("<image>", "").strip()}
@@ -107,18 +124,16 @@ def train():
                 
                 formatted_messages.append({"role": role, "content": formatted_content})
 
-            # 2. Apply chat template (handles both text and image preprocessing)
             inputs = processor.apply_chat_template(
                 formatted_messages,
                 images=sample_images,
                 tokenize=True,
-                add_generation_prompt=False, # We are training, so we include the assistant response
+                add_generation_prompt=False,
                 return_dict=True,
                 return_tensors="pt"
             )
             batch_inputs.append({k: v.squeeze(0) for k, v in inputs.items()})
         
-        # Collate the results back into a dictionary of lists
         return {k: [dic[k] for dic in batch_inputs] for k in batch_inputs[0].keys()}
 
     # Map the preprocessing
