@@ -103,23 +103,23 @@ def train():
         def __call__(self, features):
             batch = {}
             
-            # 1. Manually pad sequences using PyTorch native utils
-            # This avoids the 'unexpected keyword argument label_pad_token_id' error
-            input_ids = [f["input_ids"] for f in features]
-            labels = [f["labels"] for f in features]
-            mm_ids = [f["mm_token_type_ids"] for f in features]
-            masks = [f["attention_mask"] for f in features]
+            # 1. Force conversion to Tensors and Pad (The Fix for TypeError)
+            # This ensures that even if 'dataset.map' returned lists, we pad Tensors.
+            input_ids = [torch.as_tensor(f["input_ids"]) for f in features]
+            labels = [torch.as_tensor(f["labels"]) for f in features]
+            mm_ids = [torch.as_tensor(f["mm_token_type_ids"]) for f in features]
+            masks = [torch.as_tensor(f["attention_mask"]) for f in features]
             
             batch["input_ids"] = pad_sequence(input_ids, batch_first=True, padding_value=processor.tokenizer.pad_token_id)
             batch["labels"] = pad_sequence(labels, batch_first=True, padding_value=-100)
             batch["mm_token_type_ids"] = pad_sequence(mm_ids, batch_first=True, padding_value=0)
             batch["attention_mask"] = pad_sequence(masks, batch_first=True, padding_value=0)
             
-            # 2. Stack fixed tensors
+            # 2. Stack fixed multimodal tensors
             if "pixel_values" in features[0]:
-                batch["pixel_values"] = torch.stack([f["pixel_values"] for f in features])
+                batch["pixel_values"] = torch.stack([torch.as_tensor(f["pixel_values"]) for f in features])
             if "image_grid_thw" in features[0]:
-                batch["image_grid_thw"] = torch.stack([f["image_grid_thw"] for f in features])
+                batch["image_grid_thw"] = torch.stack([torch.as_tensor(f["image_grid_thw"]) for f in features])
                 
             return batch
 
