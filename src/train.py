@@ -4,6 +4,7 @@ import logging
 import os
 import json
 import torch
+from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoProcessor, 
     GlmOcrForConditionalGeneration, 
@@ -98,30 +99,33 @@ def train():
         remove_columns=dataset.column_names
     )
 
-    class MultimodalDataCollator:
+    class ManualMultimodalDataCollator:
         def __call__(self, features):
-            # 1. Handle text/token keys (pad them to same length)
-            token_keys = ["input_ids", "attention_mask", "mm_token_type_ids", "labels"]
-            batch_tokens = []
-            for f in features:
-                f_tokens = {k: f[k] for k in token_keys if k in f}
-                batch_tokens.append(f_tokens)
+            batch = {}
             
-            # Use tokenizer.pad instead of processor.pad
-            batch = processor.tokenizer.pad(
-                batch_tokens, 
-                return_tensors="pt", 
-                padding=True,
-                # Pad labels with -100 to ignore in loss
-                label_pad_token_id=-100 
-            )
+            # 1. Manually pad token-based sequences
+            input_ids = [f["input_ids"] for f in features]
+            labels = [f["labels"] for f in features]
+            mm_ids = [f["mm_token_type_ids"] for f in features]
+            masks = [f["attention_mask"] for f in features]
             
-            # 2. Handle multimodal keys (stack them)
-            # These are already tensors of fixed size per image from the processor
+            batch["input_ids"] = pad_sequence(input_ids, batch_first=True, padding_value=processor.tokenizer.pad_token_id)
+            batch["labels"] = pad_sequence(labels, batch_first=True, padding_value=-100)
+            batch["mm_token_type_ids"] = pad_sequence(mm_ids, batch_first=True, padding_value=0)
+            batch["attention_mask"] = pad_sequence(masks, batch_first=True, padding_value=0)
+            
+            # Handle rope_deltas if present
+            if "rope_deltas" in features[0]:
+                rope_deltas = [f["rope_deltas"] for f in features]
+                batch["rope_deltas"] = pad_sequence(rope_deltas, batch_first=True, padding_value=0)
+            
+            # 2. Concatenate multimodal tensors on dim=0
+            # Mapping 'pixel_values' to 'images' for model forward pass compatibility
             if "pixel_values" in features[0]:
-                batch["pixel_values"] = torch.stack([f["pixel_values"] for f in features])
+                batch["images"] = torch.cat([f["pixel_values"] for f in features], dim=0)
+            
             if "image_grid_thw" in features[0]:
-                batch["image_grid_thw"] = torch.stack([f["image_grid_thw"] for f in features])
+                batch["image_grid_thw"] = torch.cat([f["image_grid_thw"] for f in features], dim=0)
                 
             return batch
 
@@ -142,7 +146,7 @@ def train():
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        data_collator=MultimodalDataCollator()
+        data_collator=ManualMultimodalDataCollator()
     )
 
     logger.info("Starting Training...")
