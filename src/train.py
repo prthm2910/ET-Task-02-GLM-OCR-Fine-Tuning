@@ -103,7 +103,8 @@ def train():
         def __call__(self, features):
             batch = {}
             
-            # 1. Manually pad token-based sequences
+            # 1. Manually pad sequences using PyTorch native utils
+            # This avoids the 'unexpected keyword argument label_pad_token_id' error
             input_ids = [f["input_ids"] for f in features]
             labels = [f["labels"] for f in features]
             mm_ids = [f["mm_token_type_ids"] for f in features]
@@ -114,18 +115,11 @@ def train():
             batch["mm_token_type_ids"] = pad_sequence(mm_ids, batch_first=True, padding_value=0)
             batch["attention_mask"] = pad_sequence(masks, batch_first=True, padding_value=0)
             
-            # Handle rope_deltas if present
-            if "rope_deltas" in features[0]:
-                rope_deltas = [f["rope_deltas"] for f in features]
-                batch["rope_deltas"] = pad_sequence(rope_deltas, batch_first=True, padding_value=0)
-            
-            # 2. Concatenate multimodal tensors on dim=0
-            # Mapping 'pixel_values' to 'images' for model forward pass compatibility
+            # 2. Stack fixed tensors
             if "pixel_values" in features[0]:
-                batch["images"] = torch.cat([f["pixel_values"] for f in features], dim=0)
-            
+                batch["pixel_values"] = torch.stack([f["pixel_values"] for f in features])
             if "image_grid_thw" in features[0]:
-                batch["image_grid_thw"] = torch.cat([f["image_grid_thw"] for f in features], dim=0)
+                batch["image_grid_thw"] = torch.stack([f["image_grid_thw"] for f in features])
                 
             return batch
 
