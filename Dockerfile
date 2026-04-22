@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.10.0-cuda12.4-cudnn9-devel
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-devel
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -14,7 +14,6 @@ RUN apt-get update && apt-get install -y \
     curl \
     libgl1-mesa-glx \
     libglib2.0-0 && \
-    # 1. Purge static libraries (saves ~1-2GB)
     apt-get purge -y "*static*" && \
     apt-get autoremove -y && \
     apt-get clean && \
@@ -30,24 +29,18 @@ ENV MAX_JOBS=4
 # Install Python dependencies
 COPY requirements.txt .
 
-# 2. DO NOT uninstall torch from the base image.
-# 3. Only uninstall legacy transformers/peft if they exist.
-# 4. Install requirements pinned to the base image versions.
 RUN pip install --no-cache-dir --upgrade pip && \
     pip uninstall -y transformers accelerate peft bitsandbytes && \
     pip cache purge && \
     pip install --no-cache-dir packaging ninja && \
-    pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124 && \
-    pip install --no-cache-dir "flash-attn==2.7.0" --no-build-isolation && \
-    # 5. Final cleanup
+    pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --no-cache-dir "flash-attn==2.6.3" --no-build-isolation && \
     rm -rf /root/.cache/pip
 
 # Copy source code and entrypoint
 COPY src/ /opt/ml/code/src/
 COPY entrypoint.sh /opt/ml/code/
 
-# Make entrypoint executable
 RUN chmod +x /opt/ml/code/entrypoint.sh
 
-# Set the entrypoint
 ENTRYPOINT ["/opt/ml/code/entrypoint.sh"]
