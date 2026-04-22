@@ -13,6 +13,7 @@ from transformers import (
 from peft import LoraConfig, get_peft_model, TaskType
 from datasets import load_from_disk
 
+# 1. Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -72,41 +73,23 @@ def train():
         lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM
     )
     model = get_peft_model(model, config)
-    model.print_trainable_parameters()
 
     def preprocess_function(examples):
-        batch_inputs = []
+        processed_batches = []
         for i in range(len(examples["messages"])):
             msg_list = examples["messages"][i]
             sample_images = examples["images"][i]
             if not isinstance(sample_images, list):
                 sample_images = [sample_images]
             
-            # Format message for GLM-OCR
-            formatted_messages = []
-            for m in msg_list:
-                role = m["role"]
-                content_str = m["content"]
-                if role == "user":
-                    formatted_content = [
-                        {"type": "image"}, 
-                        {"type": "text", "text": content_str.replace("<image>", "").strip()}
-                    ]
-                else:
-                    formatted_content = [{"type": "text", "text": content_str}]
-                formatted_messages.append({"role": role, "content": formatted_content})
-
-            prompt = processor.apply_chat_template(formatted_messages, tokenize=False, add_generation_prompt=False)
-            
+            prompt = processor.apply_chat_template(msg_list, tokenize=False, add_generation_prompt=False)
             inputs = processor(text=[prompt], images=sample_images, return_tensors="pt")
+            
             item = {k: v.squeeze(0) for k, v in inputs.items()}
-            
-            # THE FIX: Add labels for loss calculation
-            # For autoregressive training, labels are the same as input_ids.
             item["labels"] = item["input_ids"].clone()
-            batch_inputs.append(item)
+            processed_batches.append(item)
             
-        return {k: [d[k] for d in batch_inputs] for k in batch_inputs[0].keys()}
+        return {k: [d[k] for d in processed_batches] for k in processed_batches[0].keys()}
 
     train_dataset = dataset.map(
         preprocess_function, 
@@ -117,27 +100,28 @@ def train():
 
     class MultimodalDataCollator:
         def __call__(self, features):
-            # Extract labels before padding as processor.pad may ignore them
-            labels = [f.pop("labels") for f in features] if "labels" in features[0] else None
+            # 1. Handle text/token keys (pad them to same length)
+            token_keys = ["input_ids", "attention_mask", "mm_token_type_ids", "labels"]
+            batch_tokens = []
+            for f in features:
+                f_tokens = {k: f[k] for k in token_keys if k in f}
+                batch_tokens.append(f_tokens)
             
-            # Pad the remaining features (input_ids, attention_mask, pixel_values, etc.)
-            batch = processor.pad(features, return_tensors="pt")
+            # Use tokenizer.pad instead of processor.pad
+            batch = processor.tokenizer.pad(
+                batch_tokens, 
+                return_tensors="pt", 
+                padding=True,
+                # Pad labels with -100 to ignore in loss
+                label_pad_token_id=-100 
+            )
             
-            if labels is not None:
-                max_label_length = max(len(l) for l in labels)
-                padded_labels = []
-                for l in labels:
-                    # Pad labels with -100 to ignore padding in loss calculation
-                    padding_length = max_label_length - len(l)
-                    if padding_length > 0:
-                        padded_labels.append(torch.cat([l, torch.full((padding_length,), -100, dtype=torch.long)]))
-                    else:
-                        padded_labels.append(l)
-                batch["labels"] = torch.stack(padded_labels)
-                
-            # SAFETY CHECK: Ensure mm_token_type_ids exists if needed by the model
-            if "mm_token_type_ids" not in batch and "input_ids" in batch:
-                batch["mm_token_type_ids"] = torch.zeros_like(batch["input_ids"])
+            # 2. Handle multimodal keys (stack them)
+            # These are already tensors of fixed size per image from the processor
+            if "pixel_values" in features[0]:
+                batch["pixel_values"] = torch.stack([f["pixel_values"] for f in features])
+            if "image_grid_thw" in features[0]:
+                batch["image_grid_thw"] = torch.stack([f["image_grid_thw"] for f in features])
                 
             return batch
 
@@ -150,7 +134,7 @@ def train():
         bf16=True,
         logging_steps=1,
         save_strategy="no" if is_smoke_test else "epoch",
-        remove_unused_columns=False, # Crucial for multimodal
+        remove_unused_columns=False,
         report_to="none"
     )
 
