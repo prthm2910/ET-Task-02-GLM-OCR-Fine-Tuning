@@ -10,7 +10,7 @@ Audit current implementation and identify version mismatches and architecture pa
 Implement the findings from Research to ensure a zero-error deployment.
 **Requirements:** [ENV-01, CODE-01, CODE-02, CODE-03]
 **Plans:**
-- [ ] 01-01-PLAN.md — Environment Hardening (requirements & Docker)
+- [x] 01-01-PLAN.md — Environment Hardening (requirements & Docker)
 - [ ] 01-02-PLAN.md — Collator & Forward Pass Rewrite
 - [ ] 01-03-PLAN.md — Verification & Smoke Test
 
