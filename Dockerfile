@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-devel
+FROM pytorch/pytorch:2.10.0-cuda12.4-cudnn9-devel
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -37,8 +37,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip uninstall -y transformers accelerate peft bitsandbytes && \
     pip cache purge && \
     pip install --no-cache-dir packaging ninja && \
-    pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121 && \
-    pip install --no-cache-dir "flash-attn==2.6.3" --no-build-isolation && \
+    pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124 && \
+    pip install --no-cache-dir "flash-attn==2.7.0" --no-build-isolation && \
     # 5. Final cleanup
     rm -rf /root/.cache/pip
 
